@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Pro Virtual Air Writing AI</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <style>
+    :root { --primary: #00f2fe; --accent: #4facfe; }
+    body { font-family: 'Inter', sans-serif; background: #0a0a0a; color: white; margin: 0; overflow: hidden; display: flex; }
+    
+    #sidebar { width: 280px; background: #151515; padding: 20px; border-right: 1px solid #333; display: flex; flex-direction: column; gap: 20px; }
+    #main { flex-grow: 1; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+
+    #container { position: relative; width: 800px; height: 600px; background: #000; border-radius: 20px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.8); border: 2px solid #333; }
+    .input_video { display: none; }
+    .output_canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; transform: rotateY(180deg); opacity: 0.4; }
+    #draw_canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; transform: rotateY(180deg); z-index: 5; }
+    
+    .hud { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 10px; border-left: 4px solid var(--primary); }
+    .gesture-badge { font-size: 24px; font-weight: bold; color: var(--primary); display: block; margin-bottom: 5px; }
+    
+    .tool-tile { background: #222; padding: 15px; border-radius: 12px; border: 1px solid #444; }
+    .tool-tile h3 { margin: 0 0 10px 0; font-size: 14px; color: #888; text-transform: uppercase; }
+    .color-dot { width: 30px; height: 30px; border-radius: 50%; display: inline-block; margin-right: 8px; border: 2px solid transparent; }
+    .color-dot.active { border-color: white; transform: scale(1.2); }
+
+    button { width: 100%; padding: 12px; border-radius: 8px; border: none; background: var(--accent); color: white; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    button:hover { filter: brightness(1.2); }
+    button.secondary { background: #333; }
+
+    #status-msg { position: absolute; bottom: 20px; color: #ff4444; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h2 style="margin:0; color:var(--primary)">AirWrite Pro</h2>
+  <p style="font-size:12px; color:#666">v2.0 Production AI</p>
+
+  <div class="tool-tile">
+    <h3>Current Tool</h3>
+    <div id="active-tool" style="font-size:18px; font-weight:bold">Initializing...</div>
+  </div>
+
+  <div class="tool-tile">
+    <h3>Brush Stats</h3>
+    <div>Size: <span id="brush-size-val">5</span>px</div>
+    <div style="margin-top:10px">
+      <div class="color-dot active" style="background:#00f2fe" data-color="#00f2fe"></div>
+      <div class="color-dot" style="background:#ff007f" data-color="#ff007f"></div>
+      <div class="color-dot" style="background:#7cfc00" data-color="#7cfc00"></div>
+      <div class="color-dot" style="background:#ffffff" data-color="#ffffff"></div>
+    </div>
+  </div>
+
+  <div style="margin-top:auto; display:flex; flex-direction:column; gap:10px">
+    <button onclick="startCamera()" id="startBtn">🚀 Launch Camera</button>
+    <button class="secondary" onclick="clearCanvas()">🧹 Clear Canvas</button>
+    <button class="secondary" onclick="downloadImage()">💾 Export PNG</button>
+  </div>
+</div>
+
+<div id="main">
+  <div id="container">
+    <div class="hud">
+      <span class="gesture-badge" id="gesture-name">Waiting...</span>
+      <span id="gesture-desc" style="font-size:12px; color:#aaa">Detecting hand pose</span>
+    </div>
+    <video class="input_video"></video>
+    <canvas class="output_canvas"></canvas>
+    <canvas id="draw_canvas" width="800" height="600"></canvas>
+  </div>
+  <div id="status-msg"></div>
+</div>
+
+<script>
+const videoElement = document.getElementsByClassName('input_video')[0];
+const canvasElement = document.getElementsByClassName('output_canvas')[0];
+const canvasCtx = canvasElement.getContext('2d');
+const drawCanvas = document.getElementById('draw_canvas');
+const drawCtx = drawCanvas.getContext('2d');
+
+let brushColor = "#00f2fe";
+let brushSize = 5;
+let isDrawing = false;
+let lastX = 0, lastY = 0;
+let points = [];
+
+const COLORS = ["#00f2fe", "#ff007f", "#7cfc00", "#ffffff"];
+let colorIdx = 0;
+
+function onResults(results) {
+    canvasCtx.save();
+    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+    canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#ffffff', lineWidth: 1});
+        
+        const fingerStates = getFingerStates(landmarks);
+        const gesture = recognizeGesture(landmarks, fingerStates);
+        updateHUD(gesture);
+
+        const tip = landmarks[8];
+        const x = tip.x * drawCanvas.width;
+        const y = tip.y * drawCanvas.height;
+
+        handleAction(gesture, x, y, landmarks);
+    } else {
+        isDrawing = false;
+        updateHUD({name: "No Hand", desc: "Show your hand to camera"});
+    }
+    canvasCtx.restore();
+}
+
+function getFingerStates(lm) {
+    return {
+        thumb: dist(lm[4], lm[17]) > dist(lm[3], lm[17]),
+        index: lm[8].y < lm[6].y,
+        middle: lm[12].y < lm[10].y,
+        ring: lm[16].y < lm[14].y,
+        pinky: lm[20].y < lm[18].y
+    };
+}
+
+function dist(p1, p2) {
+    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+}
+
+function recognizeGesture(lm, f) {
+    // 1. Pinch for Resize
+    const pinchDist = dist(lm[4], lm[8]);
+    if (pinchDist < 0.05) return {name: "Pinch", desc: "Adjusting Brush Size", code: "PINCH"};
+
+    // 2. Clear (Palm)
+    if (f.index && f.middle && f.ring && f.pinky) return {name: "Palm", desc: "Release to Clear", code: "CLEAR"};
+
+    // 3. Save (Thumb Up)
+    if (f.thumb && !f.index && !f.middle && !f.ring && !f.pinky) return {name: "Thumb Up", desc: "Saving Drawing", code: "SAVE"};
+
+    // 4. Color Swap (Spider-man)
+    if (f.thumb && f.index && !f.middle && !f.ring && f.pinky) return {name: "Spider", desc: "Cycling Colors", code: "COLOR"};
+
+    // 5. Hover (V-Sign)
+    if (f.index && f.middle && !f.ring) return {name: "Hover", desc: "Moving Pointer", code: "HOVER"};
+
+    // 6. Draw (Index Only)
+    if (f.index && !f.middle && !f.ring) return {name: "Write", desc: "Drawing on Canvas", code: "DRAW"};
+
+    return {name: "None", desc: "Ready", code: "NONE"};
+}
+
+let lastColorSwap = 0;
+function handleAction(g, x, y, lm) {
+    document.getElementById('active-tool').innerText = g.name;
+
+    if (g.code === "DRAW") {
+        if (!isDrawing) {
+            lastX = x; lastY = y;
+            isDrawing = true;
+        }
+        drawCtx.beginPath();
+        drawCtx.moveTo(lastX, lastY);
+        drawCtx.lineTo(x, y);
+        drawCtx.strokeStyle = brushColor;
+        drawCtx.lineWidth = brushSize;
+        drawCtx.lineCap = "round";
+        drawCtx.stroke();
+        lastX = x; lastY = y;
+    } else {
+        isDrawing = false;
+    }
+
+    if (g.code === "PINCH") {
+        const d = dist(lm[4], lm[20]) * 100;
+        brushSize = Math.max(2, Math.min(50, Math.floor(d)));
+        document.getElementById('brush-size-val').innerText = brushSize;
+    }
+
+    if (g.code === "COLOR") {
+        if (Date.now() - lastColorSwap > 1000) {
+            colorIdx = (colorIdx + 1) % COLORS.length;
+            brushColor = COLORS[colorIdx];
+            updateColorUI();
+            lastColorSwap = Date.now();
+        }
+    }
+
+    if (g.code === "CLEAR") {
+        clearCanvas();
+    }
+}
+
+function updateColorUI() {
+    const dots = document.querySelectorAll('.color-dot');
+    dots.forEach((d, i) => {
+        d.classList.toggle('active', i === colorIdx);
+    });
+}
+
+function updateHUD(g) {
+    document.getElementById('gesture-name').innerText = g.name;
+    document.getElementById('gesture-desc').innerText = g.desc;
+}
+
+const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.8, minTrackingConfidence: 0.8 });
+hands.onResults(onResults);
+
+async function startCamera() {
+    try {
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 800, height: 600
+        });
+        camera.start();
+        document.getElementById('startBtn').style.display = "none";
+    } catch (e) {
+        document.getElementById('status-msg').innerText = "Webcam Error: Please allow permissions.";
+    }
+}
+
+function clearCanvas() { drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height); }
+function downloadImage() {
+    const link = document.createElement('a');
+    link.download = 'air-writing-pro.png';
+    link.href = drawCanvas.toDataURL();
+    link.click();
+}
+</script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a1043f018b94ff74',t:'MTc4MjIyNTYwNw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
